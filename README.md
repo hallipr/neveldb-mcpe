@@ -76,4 +76,24 @@ It basically breaks down like this
 So.... what does asking a table cache to get a key look like?
 
 ### tableCache.Get(fileNumber, fileSize, key)
-...
+
+``` cpp
+    Status TableCache::Get(const ReadOptions& options,
+                        uint64_t file_number,
+                        uint64_t file_size,
+                        const Slice& k,
+                        void* arg,
+                        void (*saver)(void*, const Slice&, const Slice&)) {
+    Cache::Handle* handle = NULL;
+    Status s = FindTable(file_number, file_size, &handle);
+    if (s.ok()) {
+        Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
+        s = t->InternalGet(options, k, arg, saver);
+        cache_->Release(handle);
+    }
+    return s;
+    }
+```
+
+We find the table, then if all is good, we ask the table to get the value for the key.
+I think the ```cache_->Value(handle)``` does the caching. If so, we cache a table at a time, not a key/value pair.  
