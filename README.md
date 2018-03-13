@@ -126,25 +126,24 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size, Cache::Ha
 
 Once we have a table, we call table->InternalGet:
 
-```
-Status Table::InternalGet(const ReadOptions& options, const Slice& k,
-                          void* arg,
-                          void (*saver)(void*, const Slice&, const Slice&)) {
-  Status s;
-  Iterator* iiter = rep_->index_block->NewIterator(rep_->options.comparator);
-  iiter->Seek(k);
+``` cpp
+Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg, void (*saver)(void*, const Slice&, const Slice&)) {
+  get an index iterator and seek the key
   if (iiter->Valid()) {
     Slice handle_value = iiter->value();
     FilterBlockReader* filter = rep_->filter;
     BlockHandle handle;
-    if (filter != NULL &&
-        handle.DecodeFrom(&handle_value).ok() &&
+    // see if the filter thinks we can ignore the handle value
+    if (filter != NULL && handle.DecodeFrom(&handle_value).ok() &&
         !filter->KeyMayMatch(handle.offset(), k)) {
       // Not found
     } else {
+      // we found a block that may contain the key, seek the block
       Iterator* block_iter = BlockReader(this, options, iiter->value());
       block_iter->Seek(k);
       if (block_iter->Valid()) {
+        // looks like we output the value using a delegate "saver"
+        // saver(arg, key, value)        
         (*saver)(arg, block_iter->key(), block_iter->value());
       }
       s = block_iter->status();
@@ -158,3 +157,49 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k,
   return s;
 }
 ```
+
+
+So, I completely ignored the "saver" delegate being passed down from Version and the state object arg beside it.   It points back to SaveValue in version_set.cc:
+
+``` cpp
+static void SaveValue(void* arg, const Slice& ikey, const Slice& v) {
+  Saver* s = reinterpret_cast<Saver*>(arg);
+  ParsedInternalKey parsed_key;
+  if (!ParseInternalKey(ikey, &parsed_key)) {
+    s->state = kCorrupt;
+  } else {
+    if (s->ucmp->Compare(parsed_key.user_key, s->user_key) == 0) {
+      s->state = (parsed_key.type == kTypeValue) ? kFound : kDeleted;
+      if (s->state == kFound && s->value) {
+        s->value->assign(v.data(), v.size());
+      }
+    }
+  }
+}
+``` 
+
+Looks like we do a user -> internal key parse check, followed by a key comparison.  We make sure the key isn't a deletion placeholder before assigning the fetched data and size to the status object's value.
+
+## So, top-down
+
+``` c#
+db.Get(key) {
+    versionSet.Current.Get(key) {
+        files = GetFilesToCheck
+        foreach(file in files) {
+            tableCache.Get(file, key) {
+                var table = GetTableWithCache(file);
+                table.Get(key) {
+                    var block = index.get(key);
+                    if(block && filter(block)) {
+                        var kvPair = block.get(key)
+                        return kvPair
+                    }
+                }
+            }
+
+            if(found) break;
+        }
+    }
+}
+
