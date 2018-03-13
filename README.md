@@ -97,3 +97,64 @@ So.... what does asking a table cache to get a key look like?
 
 We find the table, then if all is good, we ask the table to get the value for the key.
 I think the ```cache_->Value(handle)``` does the caching. If so, we cache a table at a time, not a key/value pair.  
+
+Nope, the caching happens here :)
+
+``` cpp
+Status TableCache::FindTable(uint64_t file_number, uint64_t file_size, Cache::Handle** handle) {
+  lookup key in cache
+
+  if (cache miss) {
+    build file name
+    open the file
+
+    if (!s.ok()) {
+      try again with an "old" file name...  maybe old=legacy?
+    }
+    
+    if (s.ok()) {
+      Table::Open(*options_, file, file_size, &table);
+    }
+
+    if (s.ok()) {
+      insert the table and file into cache under the key
+    }
+
+    return s
+  }
+```
+
+Once we have a table, we call table->InternalGet:
+
+```
+Status Table::InternalGet(const ReadOptions& options, const Slice& k,
+                          void* arg,
+                          void (*saver)(void*, const Slice&, const Slice&)) {
+  Status s;
+  Iterator* iiter = rep_->index_block->NewIterator(rep_->options.comparator);
+  iiter->Seek(k);
+  if (iiter->Valid()) {
+    Slice handle_value = iiter->value();
+    FilterBlockReader* filter = rep_->filter;
+    BlockHandle handle;
+    if (filter != NULL &&
+        handle.DecodeFrom(&handle_value).ok() &&
+        !filter->KeyMayMatch(handle.offset(), k)) {
+      // Not found
+    } else {
+      Iterator* block_iter = BlockReader(this, options, iiter->value());
+      block_iter->Seek(k);
+      if (block_iter->Valid()) {
+        (*saver)(arg, block_iter->key(), block_iter->value());
+      }
+      s = block_iter->status();
+      delete block_iter;
+    }
+  }
+  if (s.ok()) {
+    s = iiter->status();
+  }
+  delete iiter;
+  return s;
+}
+```
